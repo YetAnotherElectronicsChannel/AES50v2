@@ -45,6 +45,10 @@ begin
 			rx			:= rx_samples(1);
 			valid_o		<= '0';
 
+			if clks_per_bit_i = 0 then
+				state <= S_IDLE;
+				clk_cnt <= 0;
+			else
 			case state is
 				when S_IDLE =>
 					clk_cnt <= 0;
@@ -86,6 +90,7 @@ begin
 						clk_cnt <= clk_cnt + 1;
 					end if;
 			end case;
+			end if;
 		end if;
 	end process;
 
@@ -122,7 +127,10 @@ begin
 	process (clk_i)
 	begin
 		if rising_edge(clk_i) then
-			if busy = '0' then
+			if clks_per_bit_i = 0 then
+				busy <= '0';
+				clk_cnt <= 0;
+			elsif busy = '0' then
 				if start_i = '1' then
 					shift	<= '1' & data_i & '0';
 					busy	<= '1';

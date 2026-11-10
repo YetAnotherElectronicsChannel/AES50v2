@@ -57,7 +57,8 @@ entity aes50_i2c_master is
 	sda_en_o		: out std_logic;
 	scl_en_o  		: out std_logic;
 	scl_o			: out std_logic;
-	sda_o			: out std_logic
+	sda_o			: out std_logic;
+	stop_done_o : out std_logic := '0' -- pulse after the transaction STOP
 	);                   
 end aes50_i2c_master;
 
@@ -95,14 +96,13 @@ begin
       elsif(stretch = '0') then           --clock stretching from slave not detected
         count := count + 1;               --continue clock generation timing
       end if;
-      CASE count is
-        when 0 to divider-1 =>            --first 1/4 cycle of clocking
+      if count < divider then            --first 1/4 cycle of clocking
           scl_clk <= '0';
           data_clk <= '0';
-        when divider to divider*2-1 =>    --second 1/4 cycle of clocking
+        elsif count < divider*2 then    --second 1/4 cycle of clocking
           scl_clk <= '0';
           data_clk <= '1';
-        when divider*2 to divider*3-1 =>  --third 1/4 cycle of clocking
+        elsif count < divider*3 then  --third 1/4 cycle of clocking
           scl_clk <= '1';                 --release scl
           if(scl_i = '0') then              --detect if slave is stretching clock
             stretch <= '1';
@@ -110,10 +110,10 @@ begin
             stretch <= '0';
           end if;
           data_clk <= '1';
-        when OTHERS =>                    --last 1/4 cycle of clocking
+        else                             --last 1/4 cycle of clocking
           scl_clk <= '1';
           data_clk <= '0';
-      end CASE;
+      end if;
     end if;
   end process;
 
@@ -122,6 +122,7 @@ begin
   begin
     if(rst_n_i = '0') then                 --reset asserted
       state <= ready;                      --return to initial state
+      stop_done_o <= '0';
       busy_o <= '1';                         --indicate not available
       scl_ena <= '0';                      --sets scl high impedance
       sda_int <= '1';                      --sets sda high impedance
@@ -129,6 +130,7 @@ begin
       bit_cnt <= 7;                        --restarts data bit counter
       data_rd_o <= "00000000";               --clear data read port
     elsif(rising_edge(clk_i)) then
+      stop_done_o <= '0';
       if(data_clk = '1' and data_clk_prev = '0') then  --data clock rising edge
         CASE state is
           when ready =>                      --idle state
@@ -220,6 +222,7 @@ begin
               state <= stop;                 --go to stop bit
             end if;
           when stop =>                       --stop bit of transaction
+            stop_done_o <= '1';
             busy_o <= '0';                     --unflag busy_o
             state <= ready;                  --go to idle state
         end CASE;    

@@ -46,7 +46,8 @@ entity aes50_cs2x00_pll_controller is
 		sda_en_o				: out std_logic;
 		scl_en_o				: out std_logic;
 		scl_o					: out std_logic;
-		sda_o					: out std_logic
+		sda_o					: out std_logic;
+		cs2x00_init_error_o : out std_logic := '0' -- latched until reset or a new multiplier
 	);
 end aes50_cs2x00_pll_controller;
 
@@ -58,6 +59,7 @@ architecture rtl of aes50_cs2x00_pll_controller is
 	-- pause before the first and after every register write, ~167 us
 	-- (v1: 16383 clocks at 100 MHz)
 	constant C_WAIT_CLKS	: natural := G_CLK_HZ / 6000;
+	constant C_TRANSFER_CLKS : positive := G_CLK_HZ / 1000; -- 1 ms per register write
 
 	-- register write sequence: (register address, value)
 	--   0x03 : 0x07  AUX pin = PLL lock, device config enable 1
@@ -92,9 +94,11 @@ architecture rtl of aes50_cs2x00_pll_controller is
 		S_SEND_DATA,		-- master ready for the next byte: register value
 		S_DATA_BUSY,		-- wait until the master took the register value
 		S_DATA_DONE,		-- byte sent, end the transfer
+		S_STOP_DONE,
 		S_PAUSE,			-- pause, then next register or done
-		S_DONE);
+		S_DONE, S_ERROR);
 	signal state			: state_t := S_WAIT_RESET;
+	signal transfer_left : natural range 0 to C_TRANSFER_CLKS := C_TRANSFER_CLKS;
 
 	signal wait_cnt			: natural range 0 to C_WAIT_CLKS := C_WAIT_CLKS;
 	signal reg_index		: natural range 0 to C_NUM_REGS - 1 := 0;
@@ -107,6 +111,7 @@ architecture rtl of aes50_cs2x00_pll_controller is
 	signal i2c_rw			: std_logic := '0';
 	signal i2c_data			: std_logic_vector(7 downto 0) := (others => '0');
 	signal i2c_busy			: std_logic;
+	signal i2c_stop_done : std_logic;
 	signal i2c_ack_error	: std_logic;
 
 begin
@@ -125,6 +130,7 @@ begin
 			busy_o			=> i2c_busy,
 			data_rd_o		=> open,
 			ack_error_bfr	=> i2c_ack_error,
+			stop_done_o => i2c_stop_done,
 			sda_i			=> sda_i,
 			scl_i			=> scl_i,
 			sda_en_o		=> sda_en_o,
@@ -143,6 +149,9 @@ begin
 				pll_mult_last		<= pll_mult_value_i;
 				pll_mult			<= std_logic_vector(to_unsigned(pll_mult_value_i, 32));
 				cs2x00_init_busy_o	<= '1';
+				cs2x00_init_error_o <= '0';
+				i2c_rst_n <= '0';
+				i2c_enable <= '0';
 			else
 				case state is
 					when S_WAIT_RESET =>
@@ -157,6 +166,7 @@ begin
 						end if;
 
 					when S_SEND_ADDR =>
+						transfer_left <= C_TRANSFER_CLKS;
 						i2c_enable	<= '1';
 						i2c_data	<= C_REG_TABLE(reg_index, 0);
 						state		<= S_ADDR_BUSY;
@@ -186,8 +196,13 @@ begin
 					when S_DATA_DONE =>
 						if i2c_busy = '0' then
 							i2c_enable	<= '0';
-							wait_cnt	<= C_WAIT_CLKS;
-							state		<= S_PAUSE;
+							state <= S_STOP_DONE;
+						end if;
+
+					when S_STOP_DONE =>
+						if i2c_stop_done = '1' then
+							wait_cnt <= C_WAIT_CLKS;
+							state <= S_PAUSE;
 						end if;
 
 					when S_PAUSE =>
@@ -201,9 +216,26 @@ begin
 							cs2x00_init_busy_o	<= '0';
 						end if;
 
+					when S_ERROR =>
+						null; -- keep the core in reset; reset or a new multiplier retries
+
 					when S_DONE =>
 						null;
 				end case;
+				if state = S_ADDR_BUSY or state = S_SEND_DATA or state = S_DATA_BUSY or state = S_DATA_DONE or state = S_STOP_DONE then
+					if transfer_left > 0 then transfer_left <= transfer_left - 1; end if;
+				end if;
+				-- Busy falls before the last ACK; wait for STOP and check errors through the pause.
+				if ((state = S_ADDR_BUSY or state = S_SEND_DATA or state = S_DATA_BUSY or state = S_DATA_DONE or state = S_STOP_DONE)
+					and transfer_left = 0) or
+					((state = S_ADDR_BUSY or state = S_SEND_DATA or state = S_DATA_BUSY or
+					  state = S_DATA_DONE or state = S_STOP_DONE or state = S_PAUSE) and i2c_ack_error = '1') then
+					state <= S_ERROR;
+					cs2x00_init_error_o <= '1';
+					cs2x00_init_busy_o <= '1';
+					i2c_enable <= '0';
+					i2c_rst_n <= '0';
+				end if;
 			end if;
 		end if;
 	end process;

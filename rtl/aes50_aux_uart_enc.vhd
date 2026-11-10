@@ -46,6 +46,8 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
+use work.aes50_pkg.all;
+
 entity aes50_aux_uart_enc is
 	generic (
 		G_FIFO_AW		: natural := 11			-- UART input FIFO: 2**G_FIFO_AW - 1 bytes
@@ -65,7 +67,8 @@ entity aes50_aux_uart_enc is
 		aux_we_o		: out std_logic;
 		aux_addr_o		: out unsigned(7 downto 0);
 		aux_data_o		: out std_logic_vector(15 downto 0);
-		done_o			: out std_logic
+		done_o			: out std_logic;
+		overflow_o : out std_logic := '0'
 	);
 end entity;
 
@@ -78,6 +81,7 @@ architecture rtl of aes50_aux_uart_enc is
 	signal uart_data		: std_logic_vector(7 downto 0);
 	signal fifo_rd			: std_logic;
 	signal fifo_data		: std_logic_vector(7 downto 0);
+	signal fifo_count : unsigned(G_FIFO_AW - 1 downto 0);
 	signal fifo_empty		: std_logic;
 	signal idle_cnt			: natural range 0 to 16777215;		-- clocks since the last UART byte
 	signal ready_to_send	: std_logic;						-- UART idle long enough, bytes waiting
@@ -108,19 +112,19 @@ begin
 	u_fifo : entity work.aes50_fifo
 		generic map (G_AW => G_FIFO_AW, G_DW => 8)
 		port map (clk_i => clk_i, rst_i => rst_i, wr_en_i => uart_valid, wr_data_i => uart_data,
-				  rd_en_i => fifo_rd, rd_data_o => fifo_data, empty_o => fifo_empty, count_o => open);
+				  rd_en_i => fifo_rd, rd_data_o => fifo_data, empty_o => fifo_empty, count_o => fifo_count, overflow_o => overflow_o);
 
-	-- start a packet only after a UART pause
+	-- A half-full FIFO also starts a packet, so continuous UART input can drain.
+	ready_to_send <= '1' when fifo_empty = '0' and
+		(idle_cnt >= timeout_clks_i or fifo_count >= 2 ** (G_FIFO_AW - 1)) else '0';
+	-- A UART pause still flushes short packets.
 	process (clk_i)
 	begin
 		if rising_edge(clk_i) then
 			if rst_i = '1' or uart_valid = '1' or fifo_empty = '1' then
 				idle_cnt		<= 0;
-				ready_to_send	<= '0';
 			elsif idle_cnt < timeout_clks_i then
 				idle_cnt <= idle_cnt + 1;
-			else
-				ready_to_send <= '1';
 			end if;
 		end if;
 	end process;
@@ -143,14 +147,15 @@ begin
 				page		<= req_page_i;
 				word_idx	<= (others => '0');
 				word_bit	<= 0;
-				if fs48_i = '1' then word_last <= to_unsigned(43, 7); else word_last <= to_unsigned(87, 7); end if;
+				word_last <= aux_words(fs48_i) - 1;
 			end if;
 
-			frame_start := word_bit = 0 and (word_idx = 0 or word_idx = 44);
+			frame_start := word_bit = 0 and (word_idx = 0 or word_idx = C_AUX_WORDS_PER_FRAME);
 
 			if active = '1' then
 				case state is
 					when S_DELIM =>
+						ones_cnt <= 0;
 						if delim_bit = 0 or delim_bit = 10 then nbit := '0'; else nbit := '1'; end if;
 						valid := true;
 						if delim_bit = 10 then
@@ -207,7 +212,7 @@ begin
 						else
 							if sbit = '1' then ones_cnt <= ones_cnt + 1; else ones_cnt <= 0; end if;
 							if byte_bit = 7 then
-								if fifo_empty = '1' or ready_to_send = '0' then
+								if fifo_empty = '1' then
 									state <= S_DELIM;
 								else
 									fifo_rd	<= '1';
@@ -222,7 +227,7 @@ begin
 						ones_cnt	<= 0;
 						state		<= S_DATA;
 						if byte_done = '1' then
-							if fifo_empty = '1' or ready_to_send = '0' then
+							if fifo_empty = '1' then
 								state <= S_DELIM;
 							else
 								fifo_rd	<= '1';

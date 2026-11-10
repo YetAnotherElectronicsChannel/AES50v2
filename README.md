@@ -80,7 +80,7 @@ The defaults give the same feature set of v1.
 
 | Generic | Default | Description |
 |---|---|---|
-| **G_SUPPORT_44K1** | `true` | `false`: 48k only, half-size sample RAMs |
+| **G_SUPPORT_44K1** | `true` | `false`: 48k only, half-size sample RAMs; overrides `fs_mode_i` to 48k, including the PLL ratio |
 | **G_UART_AUX** | `true` | aux channel over UART (`false` removes encoder, decoder and FIFOs) |
 | **G_TDM_AUX** | `true` | aux channel over the 7th TDM line (`false` removes the aux RAMs of the SerDes) |
 | **G_UART_FIFO_AW** | `11` | UART FIFOs with 2^n − 1 bytes |
@@ -251,3 +251,11 @@ along with this IP core. If not, see <https://www.gnu.org/licenses/>.
 Third-party components included in this repository may be licensed under
 different terms (for example, GPLv3). These components retain their
 original licenses and are clearly marked in the source header.
+
+### PLL initialization failures
+
+The PLL controller latches `cs2x00_init_error_o` on an I2C NACK or a register write exceeding 1 ms, including the final ACK/STOP. It releases its I2C drivers and keeps `cs2x00_init_busy_o` high so the core stays in reset. An external reset or a changed multiplier starts a new attempt. Link health also requires synchronized PLL lock and the normal qualification interval after lock returns.
+
+### UART flow and error status
+
+`uart_overflow_o` pulses in the 50 MHz domain when a UART auxiliary FIFO rejects a write. Short packets flush after `uart_timeout_clks_i`; continuous input also starts draining when the input FIFO is half full. Traffic above the configured UART or auxiliary link capacity can still overflow. `uart_clks_per_bit_i = 0` disables UART RX/TX (TX stays idle high); use a fixed nonzero bit time for normal operation.

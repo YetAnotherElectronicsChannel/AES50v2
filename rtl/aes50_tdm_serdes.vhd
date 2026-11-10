@@ -61,6 +61,8 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
+use work.aes50_pkg.all;
+
 entity aes50_tdm_serdes is
 	generic (
 		G_AW			: natural := 10;		-- sample RAM address width (TX and RX)
@@ -162,18 +164,6 @@ architecture rtl of aes50_tdm_serdes is
 	signal out_aux_idx			: unsigned(6 downto 0);
 	signal out_aux_valid		: std_logic;
 
-	-- index of the last frame of a block (N - 1)
-	function last_frame_idx(fs48 : std_logic) return unsigned is
-	begin
-		if fs48 = '1' then return to_unsigned(5, 4); else return to_unsigned(10, 4); end if;
-	end function;
-
-	-- aux words per block
-	function aux_words(fs48 : std_logic) return unsigned is
-	begin
-		if fs48 = '1' then return to_unsigned(44, 7); else return to_unsigned(88, 7); end if;
-	end function;
-
 begin
 
 	tx_blk_tgl_o	<= tx_blk_toggle;
@@ -269,20 +259,20 @@ begin
 				if tx_active = '1' then
 					if tx_frame_in_block = last_frame_idx(fs48_i) then
 						tx_frame_in_block	<= (others => '0');
-						tx_block_addr		<= tx_frame_addr + 48;
+						tx_block_addr		<= tx_frame_addr + C_AUDIO_CHANNELS;
 						tx_block_cnt		<= tx_block_cnt + 1;
 					else
 						tx_frame_in_block <= tx_frame_in_block + 1;
 					end if;
-					tx_frame_addr <= tx_frame_addr + 48;
+					tx_frame_addr <= tx_frame_addr + C_AUDIO_CHANNELS;
 				elsif tx_aligned = '1' and
 					  frames_since_assm = to_unsigned(G_ASSM_FRAMES - 2 - G_TX_LEAD_ADJ, 11) - last_frame_idx(fs48_i) then
 					-- frames_since_assm is the index (relative to the ASSM frame) of the frame that ends now
 					tx_active			<= '1';
 					tx_frame_in_block	<= (others => '0');
 					tx_block_cnt		<= (others => '0');
-					tx_frame_addr		<= tx_frame_addr + 48;
-					tx_block_addr		<= tx_frame_addr + 48;
+					tx_frame_addr		<= tx_frame_addr + C_AUDIO_CHANNELS;
+					tx_block_addr		<= tx_frame_addr + C_AUDIO_CHANNELS;
 				end if;
 				-- RX playout: the next-frame context becomes current
 				play_active_cur	<= play_active_next;
@@ -358,7 +348,7 @@ begin
 			if cap_pos = last_pos - 16 then
 				if play_active_cur = '1' and play_frame_cur /= last_frame_idx(fs48_i) then
 					play_active_next	<= '1';					-- continue the current block
-					play_addr_next		<= play_addr_cur + 48;
+					play_addr_next		<= play_addr_cur + C_AUDIO_CHANNELS;
 					play_frame_next		<= play_frame_cur + 1;
 					play_page_next		<= play_page_cur;
 				elsif rx_pending = '1' then

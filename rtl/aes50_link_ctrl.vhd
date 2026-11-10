@@ -69,6 +69,7 @@ architecture rtl of aes50_link_ctrl is
 	signal clk_b_watchdog	: natural range 0 to 50;
 	signal rx_dv_watchdog	: natural range 0 to 20000;
 	signal clk_ok_cnt		: natural range 0 to 1000000;	-- how long both sync pairs are active
+	signal pll_lock_sync : std_logic_vector(1 downto 0) := "11";
 	signal clock_ok			: std_logic;
 
 	-- MDI / MDI-X selection
@@ -84,7 +85,9 @@ begin
 	process (clk_i)
 	begin
 		if rising_edge(clk_i) then
+			pll_lock_sync <= pll_lock_sync(0) & pll_lock_n_i;
 			if rst_i = '1' then
+				pll_lock_sync <= "11";
 				ref625_phase		<= (others => '0');
 				clk625_o			<= '0';
 				clk_a_watchdog		<= 0;
@@ -116,13 +119,13 @@ begin
 					clk_b_watchdog <= clk_b_watchdog - 1;
 				end if;
 
-				if clk_a_watchdog > 0 and clk_b_watchdog > 0 and pll_lock_n_i = '0' then
+				if clk_a_watchdog > 0 and clk_b_watchdog > 0 and pll_lock_sync(1) = '0' then
 					clock_ok <= '1';
 				else
 					clock_ok <= '0';
 				end if;
 
-				if clk_a_watchdog > 0 and clk_b_watchdog > 0 then
+				if clk_a_watchdog > 0 and clk_b_watchdog > 0 and pll_lock_sync(1) = '0' then
 					if clk_ok_cnt < aes_clk_ok_ref_i then
 						clk_ok_cnt <= clk_ok_cnt + 1;
 					else

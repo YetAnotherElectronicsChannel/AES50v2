@@ -46,6 +46,15 @@ use ieee.numeric_std.all;
 
 package aes50_pkg is
 
+	constant C_AUDIO_CHANNELS : positive := 48;
+	constant C_ROWS_PER_FRAME : positive := 11;
+	constant C_AUX_WORDS_PER_FRAME : positive := C_ROWS_PER_FRAME * 4;
+	function block_frames(fs48 : std_logic) return positive;
+	function block_words(fs48 : std_logic) return positive;
+	function last_frame_idx(fs48 : std_logic) return unsigned;
+	function aux_words(fs48 : std_logic) return unsigned;
+	function chunk_len(fs48 : std_logic) return unsigned;
+
 	-- block kinds
 	constant K_AUDIO		: natural := 0;
 	constant K_AUX_EVEN		: natural := 1;		-- block 26 (LC24)
@@ -58,7 +67,14 @@ package aes50_pkg is
 	function block_lc(blk : unsigned(4 downto 0)) return unsigned;
 
 	-- header octet i (0..21: dest, src, ethertype, protocol id, user octet, format id)
-	function hdr_byte(i : natural; fs48 : std_logic; assm : std_logic) return std_logic_vector;
+	function hdr_byte(i : natural; fs48 : std_logic; assm : std_logic; fs96 : std_logic := '0') return std_logic_vector;
+
+	-- OpenProSeries: audio-format octet (18) per rate and the CRC-8 octet (21) a format / ASSM flag pair must carry
+	-- (CRC-8 over octets 16..20; 0x56 = 96 kHz, 24-bit, proven against the PRO1 io image)
+	constant FMT_44K1		: std_logic_vector(7 downto 0) := x"06";
+	constant FMT_48K		: std_logic_vector(7 downto 0) := x"46";
+	constant FMT_96K		: std_logic_vector(7 downto 0) := x"56";
+	function fmt_crc(fmt : std_logic_vector(7 downto 0); assm : std_logic) return std_logic_vector;
 
 	-- position q inside a sample-pair chunk -> index n of the interleaved
 	-- stream (0..53), or 63 for pad bits
@@ -77,6 +93,32 @@ package aes50_pkg is
 end package;
 
 package body aes50_pkg is
+
+	function block_frames(fs48 : std_logic) return positive is
+	begin
+		if fs48 = '1' then return 6; else return 11; end if;
+	end function;
+
+	function block_words(fs48 : std_logic) return positive is
+	begin
+		return C_AUDIO_CHANNELS * block_frames(fs48);
+	end function;
+
+	function last_frame_idx(fs48 : std_logic) return unsigned is
+	begin
+		return to_unsigned(block_frames(fs48) - 1, 4);
+	end function;
+
+	function aux_words(fs48 : std_logic) return unsigned is
+	begin
+		if fs48 = '1' then return to_unsigned(C_AUX_WORDS_PER_FRAME, 7);
+		else return to_unsigned(2 * C_AUX_WORDS_PER_FRAME, 7); end if;
+	end function;
+
+	function chunk_len(fs48 : std_logic) return unsigned is
+	begin
+		if fs48 = '1' then return to_unsigned(58, 7); else return to_unsigned(64, 7); end if;
+	end function;
 
 	function block_kind(blk : unsigned(4 downto 0)) return natural is
 	begin
@@ -100,8 +142,20 @@ package body aes50_pkg is
 		end case;
 	end function;
 
-	function hdr_byte(i : natural; fs48 : std_logic; assm : std_logic) return std_logic_vector is
+	function fmt_crc(fmt : std_logic_vector(7 downto 0); assm : std_logic) return std_logic_vector is
 	begin
+		case fmt is
+			when FMT_48K	=> if assm = '1' then return x"AA"; else return x"1A"; end if;
+			when FMT_96K	=> if assm = '1' then return x"FB"; else return x"4B"; end if;
+			when FMT_44K1	=> if assm = '1' then return x"7C"; else return x"CC"; end if;
+			when others		=> return x"00";
+		end case;
+	end function;
+
+	function hdr_byte(i : natural; fs48 : std_logic; assm : std_logic; fs96 : std_logic := '0') return std_logic_vector is
+		variable fmt : std_logic_vector(7 downto 0);
+	begin
+		if fs96 = '1' then fmt := FMT_96K; elsif fs48 = '1' then fmt := FMT_48K; else fmt := FMT_44K1; end if;
 		case i is
 			when 0		=> return x"02";			-- destination MAC 02:00:00:00:00:00
 			when 12		=> return x"88";			-- EtherType 0x88DD (AES)
@@ -109,13 +163,8 @@ package body aes50_pkg is
 			when 14		=> return x"01";			-- protocol identifier
 			when 16		=> return x"31";			-- protocol version 3.1
 			when 17		=> if assm = '1' then return x"11"; else return x"01"; end if;	-- frame type / ASSM flag
-			when 18		=> if fs48 = '1' then return x"46"; else return x"06"; end if;	-- 24 bit PCM, 48k / 44.1k
-			when 21		=>						-- CRC-8 over octets 16..20
-				if fs48 = '1' then
-					if assm = '1' then return x"AA"; else return x"1A"; end if;
-				else
-					if assm = '1' then return x"7C"; else return x"CC"; end if;
-				end if;
+			when 18		=> return fmt;				-- 24 bit PCM, 48k / 44.1k (OpenProSeries: 96k)
+			when 21		=> return fmt_crc(fmt, assm);	-- CRC-8 over octets 16..20
 			when others	=> return x"00";			-- source MAC, user octet, structure, reserved
 		end case;
 	end function;

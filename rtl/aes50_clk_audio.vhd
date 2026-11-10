@@ -39,7 +39,11 @@ use ieee.numeric_std.all;
 
 entity aes50_clk_audio is
 	generic (
-		G_ASSM_SAMPLES		: natural := 2048		-- samples between two ASSM (only reduced for simulation)
+		G_ASSM_SAMPLES		: natural := 2048;		-- samples between two ASSM (only reduced for simulation)
+		-- OpenProSeries: 64*fs periods counted at reset (the first ASSM comes G_ASSM_SAMPLES*64 - G_ASSM_INIT
+		-- periods after it). 2 = v1 / v2 behaviour; simulations set it near the end to get the first ASSM early
+		-- without changing the ASSM period
+		G_ASSM_INIT			: natural := 2
 	);
 	port (
 		clk_i				: in  std_logic;		-- 1024 * fs from the PLL
@@ -95,7 +99,7 @@ begin
 	begin
 		if rst_i = '1' then
 			sync_phase			<= (others => '0');
-			sync_period_cnt		<= to_unsigned(2, 17);
+			sync_period_cnt		<= to_unsigned(G_ASSM_INIT, 17);
 			assm_armed			<= '0';
 			assm_pulse			<= "00";
 			assm_hold_cnt		<= (others => '0');

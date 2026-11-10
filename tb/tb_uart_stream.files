@@ -1,0 +1,1 @@
+aes50_pkg.vhd aes50_fifo.vhd aes50_uart.vhd aes50_aux_uart_enc.vhd aes50_aux_uart_dec.vhd

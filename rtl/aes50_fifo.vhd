@@ -27,7 +27,8 @@ entity aes50_fifo is
 		rd_en_i			: in  std_logic;		-- ignored when empty
 		rd_data_o		: out std_logic_vector(G_DW - 1 downto 0);
 		empty_o			: out std_logic;
-		count_o			: out unsigned(G_AW - 1 downto 0)
+		count_o			: out unsigned(G_AW - 1 downto 0);
+		overflow_o		: out std_logic := '0' -- one clock per rejected write
 	);
 end entity;
 
@@ -48,6 +49,10 @@ begin
 	process (clk_i)
 	begin
 		if rising_edge(clk_i) then
+			overflow_o <= '0';
+			if rst_i = '0' and wr_en_i = '1' and count = 2 ** G_AW - 1 then
+				overflow_o <= '1';
+			end if;
 			if wr_en_i = '1' and count /= 2 ** G_AW - 1 then
 				mem(to_integer(wr_ptr)) <= wr_data_i;
 				wr_ptr <= wr_ptr + 1;

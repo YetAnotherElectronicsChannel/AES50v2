@@ -62,6 +62,7 @@ entity aes50_tx_framer is
 		rst_i			: in  std_logic;
 
 		fs48_i			: in  std_logic;		-- '1' 48k, '0' 44.1k (static)
+		fs96_i			: in  std_logic := '0';	-- OpenProSeries: '1' (with fs48_i = '1') 96k: the 48k frame, format 0x56
 		i2s_i			: in  std_logic;		-- '1': only channels 0/1 are used, the others are sent as 0
 
 		start_i			: in  std_logic;		-- sample block complete
@@ -146,10 +147,6 @@ architecture rtl of aes50_tx_framer is
 	signal fcs_crc				: std_logic_vector(31 downto 0);
 
 	-- length of one sample-pair chunk in the LC bit stream
-	function chunk_len(fs48 : std_logic) return unsigned is
-	begin
-		if fs48 = '1' then return to_unsigned(58, 7); else return to_unsigned(64, 7); end if;
-	end function;
 
 	function even_bits(w : std_logic_vector(15 downto 0)) return std_logic_vector is
 		variable r : std_logic_vector(7 downto 0);
@@ -237,7 +234,7 @@ begin
 
 				-- ------------------------------------------------------------
 				when S_HEADER =>							-- 22 octets = 88 dibits
-					hdr_octet := hdr_byte(to_integer(step_cnt(6 downto 2)), fs48_i, assm_flag and not second_half);
+					hdr_octet := hdr_byte(to_integer(step_cnt(6 downto 2)), fs48_i, assm_flag and not second_half, fs96_i);
 					hdr_dibit := hdr_octet(2 * to_integer(step_cnt(1 downto 0)) + 1 downto 2 * to_integer(step_cnt(1 downto 0)));
 					out_kind	<= OUT_DATA;
 					out_dibit	<= hdr_dibit;
@@ -353,7 +350,7 @@ begin
 
 					-- fetch the samples of the next block, started at the second
 					-- dibit of a block (row_addr follows row_sample one clock later)
-					if dibit_idx = 1 and not (block_idx = 31 and row_idx = 10) then
+					if dibit_idx = 1 and not (block_idx = 31 and row_idx = C_ROWS_PER_FRAME - 1) then
 						start_fetch := true;
 						if block_idx = 31 then
 							fetch_block		:= (others => '0');
@@ -374,7 +371,7 @@ begin
 						cur_a0 <= fetch_a0; cur_b0 <= fetch_b0; cur_a1 <= fetch_a1; cur_b1 <= fetch_b1;
 						if block_idx = 31 then
 							block_idx <= (others => '0');
-							if row_idx = 10 then
+							if row_idx = C_ROWS_PER_FRAME - 1 then
 								state		<= S_FCS;
 								step_cnt	<= (others => '0');
 							else
@@ -450,7 +447,7 @@ begin
 					when 1		=> ram_addr_o <= fetch_addr + fetch_ch_ofs;		-- pair 0, channel a
 								   fetch_addr <= fetch_addr + fetch_ch_ofs;
 					when 2		=> ram_addr_o <= fetch_addr + 1;				-- pair 0, channel b
-					when 3		=> ram_addr_o <= fetch_addr + 48;				-- pair 1, channel a
+					when 3		=> ram_addr_o <= fetch_addr + C_AUDIO_CHANNELS;				-- pair 1, channel a
 								   fetch_a0 <= ram_data_i;
 					when 4		=> ram_addr_o <= fetch_addr + 49;				-- pair 1, channel b
 								   fetch_b0 <= ram_data_i;
@@ -482,7 +479,7 @@ begin
 					aux_row := aux_row + 1;
 				end if;
 				if fs48_i = '0' and second_half = '1' then	-- 44.1k second frame: rows 11..21
-					aux_row := aux_row + 11;
+					aux_row := aux_row + C_ROWS_PER_FRAME;
 				end if;
 				aux_word_addr <= shift_left(resize(aux_row, 7), 2);
 			elsif aux_load_step /= 0 then

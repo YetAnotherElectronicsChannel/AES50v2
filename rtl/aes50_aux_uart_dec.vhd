@@ -52,12 +52,14 @@ entity aes50_aux_uart_dec is
 		aux_start_i		: in  std_logic;		-- first word of an Ethernet frame
 
 		clks_per_bit_i	: in  natural range 0 to 65535;
-		uart_o			: out std_logic
+		uart_o			: out std_logic;
+		overflow_o : out std_logic := '0'
 	);
 end entity;
 
 architecture rtl of aes50_aux_uart_dec is
 
+	signal in_overflow, out_overflow : std_logic;
 	-- input FIFO (word + start marker); the decoder needs 16 clocks per word
 	signal in_word			: std_logic_vector(16 downto 0);		-- aux word & start marker
 	signal in_rd			: std_logic;
@@ -91,12 +93,13 @@ architecture rtl of aes50_aux_uart_dec is
 
 begin
 
+	overflow_o <= in_overflow or out_overflow;
 	in_word <= aux_data_i & aux_start_i;
 
 	u_in : entity work.aes50_fifo
 		generic map (G_AW => 4, G_DW => 17)
 		port map (clk_i => clk_i, rst_i => rst_i, wr_en_i => aux_we_i, wr_data_i => in_word,
-				  rd_en_i => in_rd, rd_data_o => in_data, empty_o => in_empty, count_o => open);
+				  rd_en_i => in_rd, rd_data_o => in_data, empty_o => in_empty, count_o => open, overflow_o => in_overflow);
 
 	process (clk_i)
 		variable cur_bit	: std_logic;
@@ -198,7 +201,7 @@ begin
 	u_out : entity work.aes50_fifo
 		generic map (G_AW => G_FIFO_AW, G_DW => 8)
 		port map (clk_i => clk_i, rst_i => rst_i, wr_en_i => byte_valid, wr_data_i => byte_data,
-				  rd_en_i => out_rd, rd_data_o => out_data, empty_o => out_empty, count_o => open);
+				  rd_en_i => out_rd, rd_data_o => out_data, empty_o => out_empty, count_o => open, overflow_o => out_overflow);
 
 	u_tx : entity work.aes50_uart_tx
 		port map (clk_i => clk_i, clks_per_bit_i => clks_per_bit_i, start_i => tx_start,

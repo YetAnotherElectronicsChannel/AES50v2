@@ -57,6 +57,7 @@ entity aes50_rx_deframer is
 		rst_i			: in  std_logic;
 
 		fs48_i			: in  std_logic;		-- '1' 48k, '0' 44.1k (static)
+		fs96_i			: in  std_logic := '0';	-- OpenProSeries: '1' (with fs48_i = '1') 96k: the 48k frame, format 0x56
 
 		rmii_crs_dv_i	: in  std_logic;
 		rmii_rxd_i		: in  std_logic_vector(1 downto 0);
@@ -77,6 +78,17 @@ entity aes50_rx_deframer is
 
 		frame_ok_o		: out std_logic;				-- pulse per frame with good FCS
 		frame_err_o		: out std_logic;				-- pulse per frame with bad FCS / truncated
+		-- OpenProSeries: pulse per good frame that ended one 32-bit word early (the frames of the AES50 v1 IP and
+		-- its forks: row 10's global parity block missing, its FCS right after row 10 block 30; 1430 bytes after
+		-- the SFD instead of 1434). Such a frame is accepted (frame_ok_o too): the receiver never uses parity.
+		frame_short_o	: out std_logic;
+		-- OpenProSeries: format detection. At the end of every header with the AES50 EtherType and protocol
+		-- id: fmt_valid_o pulses when octet 18 is a known format (0x06 / 0x46 / 0x56) and octet 21 is its
+		-- CRC-8 (for the frame's ASSM flag), whatever fs48_i / fs96_i select; fmt_o holds octet 18 until the
+		-- next header. fmt_bad_o pulses instead for an unknown format or a wrong CRC-8.
+		fmt_valid_o		: out std_logic;
+		fmt_bad_o		: out std_logic;
+		fmt_o			: out std_logic_vector(7 downto 0);
 		sync_o			: out std_logic
 	);
 end entity;
@@ -95,8 +107,13 @@ architecture rtl of aes50_rx_deframer is
 	signal hdr_shift			: std_logic_vector(7 downto 0);	-- header octet being received
 	signal header_ok			: std_logic;				-- EtherType, protocol and audio format match
 	signal frame_assm			: std_logic;				-- ASSM flag of the current frame
+	signal eth_ok				: std_logic;				-- EtherType and protocol id match
+	signal hdr_fmt				: std_logic_vector(7 downto 0);	-- octet 18
 	signal fcs_crc				: std_logic_vector(31 downto 0);
 	signal fcs_ok				: std_logic;
+	-- OpenProSeries: the CRC after row 10 block 30 and whether row 10 block 31 matched it as an FCS
+	signal crc30				: std_logic_vector(31 downto 0);
+	signal short_ok				: std_logic;
 
 	-- block bookkeeping
 	signal synced				: std_logic;				-- an ASSM frame has been seen
@@ -140,21 +157,11 @@ architecture rtl of aes50_rx_deframer is
 	signal aux_word_addr		: unsigned(6 downto 0);
 	signal aux_words			: std_logic_vector(63 downto 0);
 
-	function chunk_len(fs48 : std_logic) return unsigned is
-	begin
-		if fs48 = '1' then return to_unsigned(58, 7); else return to_unsigned(64, 7); end if;
-	end function;
 
 	function mul48(s : unsigned(3 downto 0)) return unsigned is
 		variable v : unsigned(G_AW + 5 downto 0) := resize(s, G_AW + 6);
 	begin
 		return resize(shift_left(v, 5) + shift_left(v, 4), G_AW);
-	end function;
-
-	-- RAM entries per block
-	function block_size(fs48 : std_logic) return unsigned is
-	begin
-		if fs48 = '1' then return to_unsigned(288, G_AW); else return to_unsigned(528 mod 2 ** G_AW, G_AW); end if;
 	end function;
 
 	-- shift one received bit into the sample pair if it is an audio bit
@@ -190,6 +197,7 @@ begin
 		variable blk_kind		: natural range 0 to 4;
 		variable next_block		: unsigned(4 downto 0);
 		variable block_complete	: boolean;
+		variable frame_good		: boolean;
 		variable aux64			: std_logic_vector(63 downto 0);
 		variable new_lc25		: std_logic_vector(31 downto 0);
 	begin
@@ -202,8 +210,12 @@ begin
 			aux_we_o		<= '0';
 			blk_done_o		<= '0';
 			frame_ok_o		<= '0';
+			frame_short_o	<= '0';
 			frame_err_o		<= '0';
+			fmt_valid_o		<= '0';
+			fmt_bad_o		<= '0';
 			block_complete	:= false;
+			frame_good		:= false;
 
 			case state is
 
@@ -221,6 +233,7 @@ begin
 						step_cnt	<= (others => '0');
 						fcs_crc		<= (others => '1');
 						header_ok	<= '1';
+						eth_ok		<= '1';
 						frame_assm	<= '0';
 					elsif rxd_r /= "01" then
 						state <= S_IDLE;
@@ -228,21 +241,32 @@ begin
 
 				-- ------------------------------------------------------------
 				when S_HEADER =>							-- 22 octets = 88 dibits
+					if rx_dv_r = '0' then
+						state <= S_IDLE;
+						frame_err_o <= '1';
+						block_ok <= '0';
+						if fs48_i = '0' then
+							synced <= '0';
+							second_half <= '0';
+						end if;
+					else
 					fcs_crc		<= crc32_d2(fcs_crc, rxd_r);
 					hdr_shift	<= rxd_r & hdr_shift(7 downto 2);
 					step_cnt	<= step_cnt + 1;
 					if step_cnt(1 downto 0) = "11" then		-- octet complete: rxd_r & hdr_shift(7..2)
 						case to_integer(step_cnt(6 downto 2)) is
-							when 12 => if rxd_r & hdr_shift(7 downto 2) /= x"88" then header_ok <= '0'; end if;
-							when 13 => if rxd_r & hdr_shift(7 downto 2) /= x"DD" then header_ok <= '0'; end if;
-							when 14 => if rxd_r & hdr_shift(7 downto 2) /= x"01" then header_ok <= '0'; end if;
+							when 12 => if rxd_r & hdr_shift(7 downto 2) /= x"88" then header_ok <= '0'; eth_ok <= '0'; end if;
+							when 13 => if rxd_r & hdr_shift(7 downto 2) /= x"DD" then header_ok <= '0'; eth_ok <= '0'; end if;
+							when 14 => if rxd_r & hdr_shift(7 downto 2) /= x"01" then header_ok <= '0'; eth_ok <= '0'; end if;
 							when 17 =>						-- frame type / flags
 								if (rxd_r & hdr_shift(7 downto 2)) = x"11" then
 									frame_assm <= '1';
 								end if;
 							when 18 =>						-- audio format must match fs_mode
-								if (fs48_i = '1' and (rxd_r & hdr_shift(7 downto 2)) /= x"46") or
-								   (fs48_i = '0' and (rxd_r & hdr_shift(7 downto 2)) /= x"06") then
+								hdr_fmt <= rxd_r & hdr_shift(7 downto 2);
+								if (fs96_i = '1' and (rxd_r & hdr_shift(7 downto 2)) /= FMT_96K) or
+								   (fs96_i = '0' and fs48_i = '1' and (rxd_r & hdr_shift(7 downto 2)) /= FMT_48K) or
+								   (fs48_i = '0' and (rxd_r & hdr_shift(7 downto 2)) /= FMT_44K1) then
 									header_ok <= '0';
 								end if;
 							when others => null;
@@ -279,6 +303,16 @@ begin
 
 					if step_cnt = 87 then
 						step_cnt <= (others => '0');
+						if eth_ok = '1' then
+							fmt_o <= hdr_fmt;
+							-- step 87 completes octet 21 (the format CRC-8): rxd_r & hdr_shift(7 downto 2)
+							if fmt_crc(hdr_fmt, frame_assm) = (rxd_r & hdr_shift(7 downto 2)) and
+							   (hdr_fmt = FMT_44K1 or hdr_fmt = FMT_48K or hdr_fmt = FMT_96K) then
+								fmt_valid_o <= '1';
+							else
+								fmt_bad_o <= '1';
+							end if;
+						end if;
 						if header_ok = '0' then
 							state <= S_SKIP;
 						else
@@ -298,11 +332,12 @@ begin
 							use_pair1		<= '0';
 							ch_ofs			<= (others => '0');
 							if fs48_i = '0' and second_half = '1' and frame_assm = '0' then
-								aux_word_addr <= to_unsigned(44, 7);
+								aux_word_addr <= to_unsigned(C_AUX_WORDS_PER_FRAME, 7);
 							else
 								aux_word_addr <= (others => '0');
 							end if;
 						end if;
+					end if;
 					end if;
 
 				-- ------------------------------------------------------------
@@ -325,7 +360,7 @@ begin
 						if (bit0_idx = 47 or bit1_idx = 47) and synced = '1' then
 							wr_step <= "01";
 							if use_pair1 = '1' then
-								wr_addr <= row_addr + 48 + ch_ofs;
+								wr_addr <= row_addr + C_AUDIO_CHANNELS + ch_ofs;
 							else
 								wr_addr <= row_addr + ch_ofs;
 							end if;
@@ -380,7 +415,7 @@ begin
 						use_pair1		<= '0';
 						if block_idx = 31 then
 							block_idx <= (others => '0');
-							if row_idx = 10 then
+							if row_idx = C_ROWS_PER_FRAME - 1 then
 								state		<= S_FCS;
 								step_cnt	<= (others => '0');
 								fcs_ok		<= '1';
@@ -407,14 +442,36 @@ begin
 					bit0_idx	<= chunk_index(new_chunk_bit, fs48_i);
 					bit1_idx	<= chunk_index(new_chunk_bit + 1, fs48_i);
 
-					if rx_dv_r = '0' and dibit_idx(0) = '1' then	-- carrier lost inside the frame
+					-- OpenProSeries: a frame one word short sends its FCS where row 10 block 31 would be
+					if row_idx = C_ROWS_PER_FRAME - 1 and block_idx = 30 and dibit_idx = 15 then
+						crc30		<= crc32_d2(fcs_crc, rxd_r);
+						short_ok	<= '1';
+					elsif row_idx = C_ROWS_PER_FRAME - 1 and block_idx = 31 then
+						if rxd_r /= not crc30(1 downto 0) then
+							short_ok <= '0';
+						end if;
+						crc30 <= "00" & crc30(31 downto 2);
+					end if;
+
+					-- carrier lost inside the frame; not in row 10 block 31, which is a short frame's FCS, where the
+					-- PHY may toggle CRS_DV as it does in a full frame's FCS (ignored there, see S_FCS)
+					if rx_dv_r = '0' and dibit_idx(0) = '1' and not (row_idx = C_ROWS_PER_FRAME - 1 and block_idx = 31) then
 						state		<= S_IDLE;
 						frame_err_o	<= '1';
 						block_ok	<= '0';
+						-- A cut frame loses the two-frame phase at 44.1k; wait for ASSM.
+						if fs48_i = '0' then
+							synced <= '0';
+							second_half <= '0';
+						end if;
 					end if;
 
 				-- ------------------------------------------------------------
 				when S_FCS =>								-- compare with the computed CRC
+					-- A short frame must have ended before this word, even when CRS_DV toggles over an FCS.
+					if rx_dv_r = '1' then
+						short_ok <= '0';
+					end if;
 					if rxd_r /= not fcs_crc(1 downto 0) then
 						fcs_ok <= '0';
 					end if;
@@ -422,8 +479,13 @@ begin
 					step_cnt <= step_cnt + 1;
 					if step_cnt = 15 then
 						state <= S_SKIP;
-						if rxd_r = not fcs_crc(1 downto 0) and fcs_ok = '1' then
+						frame_good := (rxd_r = not fcs_crc(1 downto 0) and fcs_ok = '1') or
+							(short_ok = '1' and rx_dv_r = '0');
+						if frame_good then
 							frame_ok_o <= '1';
+							if not (rxd_r = not fcs_crc(1 downto 0) and fcs_ok = '1') then
+								frame_short_o <= '1';
+							end if;
 						else
 							frame_err_o	<= '1';
 							block_ok	<= '0';
@@ -448,12 +510,12 @@ begin
 				blk_base_o	<= block_base;
 				blk_page_o	<= aux_page;
 				blk_assm_o	<= block_assm;
-				if fcs_ok = '0' or rxd_r /= not fcs_crc(1 downto 0) then
+				if not frame_good then
 					blk_ok_o <= '0';
 				else
 					blk_ok_o <= block_ok;
 				end if;
-				block_base	<= block_base + block_size(fs48_i);
+				block_base	<= block_base + to_unsigned(block_words(fs48_i) mod 2 ** G_AW, G_AW);
 				aux_page	<= not aux_page;
 			end if;
 
