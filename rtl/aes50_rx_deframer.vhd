@@ -321,6 +321,9 @@ begin
 								synced		<= '1';
 								second_half	<= '0';
 							end if;
+							if fs48_i = '1' then				-- 48k / 96k: every frame is a whole block, no ASSM needed
+								synced		<= '1';
+							end if;
 							if frame_assm = '1' or fs48_i = '1' or second_half = '0' then
 								block_ok	<= '1';
 								block_assm	<= frame_assm;
