@@ -142,6 +142,8 @@ architecture rtl of aes50_rx_deframer is
 	-- context RAM holding the partly received pair of every LC
 	signal pair_a, pair_b		: std_logic_vector(23 downto 0);
 	signal pair_ctx_ram			: pair_ctx_ram_t;
+	attribute ram_style : string;
+	attribute ram_style of pair_ctx_ram : signal is "distributed";
 	signal ctx_rd_lc			: unsigned(4 downto 0);
 	signal ctx_rd_data			: std_logic_vector(47 downto 0);
 
