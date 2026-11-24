@@ -103,7 +103,13 @@ entity aes50_par_core is
 		rx_assm_o				: out std_logic;		-- a block with the ASSM flag was received
 		fmt_valid_o				: out std_logic;		-- aes50_rx_deframer's format report
 		fmt_bad_o				: out std_logic;
-		fmt_o					: out std_logic_vector(7 downto 0)
+		fmt_o					: out std_logic_vector(7 downto 0);
+
+		-- AES50 header octet 15 (the user octet), clk50_i. TX: sent in every frame, taken at the frame start;
+		-- 0x00 (the default) is today's behaviour. RX: the octet of the last frame with a good FCS, 0x00 after
+		-- reset or receive loss; bad or cut frames never change it. No protocol logic: the user drives both.
+		user_octet_tx_i			: in  std_logic_vector(7 downto 0) := x"00";
+		user_octet_rx_o			: out std_logic_vector(7 downto 0)
 	);
 end entity;
 
@@ -413,6 +419,7 @@ begin
 		port map (
 			clk_i => clk50_i, rst_i => core_rst, fs48_i => '1', fs96_i => fs96_i, i2s_i => '0',
 			start_i => framer_start, base_i => framer_base, assm_i => framer_assm, aux_valid_i => framer_auxv,
+			user_i => user_octet_tx_i,
 			busy_o => framer_busy, frame_o => tx_frame_o,
 			ram_addr_o => txr_raddr, ram_data_i => txr_rdata,
 			aux_addr_o => framer_aux_addr, aux_data_i => framer_aux_data,
@@ -429,7 +436,8 @@ begin
 			blk_done_o => blk_done, blk_base_o => blk_base, blk_page_o => blk_page,
 			blk_ok_o => blk_ok, blk_assm_o => blk_assm,
 			frame_ok_o => rx_frame_ok_o, frame_err_o => rx_frame_err_o,
-			fmt_valid_o => fmt_valid_o, fmt_bad_o => fmt_bad_o, fmt_o => fmt_o, sync_o => open);
+			fmt_valid_o => fmt_valid_o, fmt_bad_o => fmt_bad_o, fmt_o => fmt_o,
+			user_o => user_octet_rx_o, sync_o => open);
 
 	u_rx_ram : entity work.aes50_dpram
 		generic map (G_AW => AW, G_DW => 24)

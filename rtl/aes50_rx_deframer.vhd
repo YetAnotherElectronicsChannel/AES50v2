@@ -89,6 +89,9 @@ entity aes50_rx_deframer is
 		fmt_valid_o		: out std_logic;
 		fmt_bad_o		: out std_logic;
 		fmt_o			: out std_logic_vector(7 downto 0);
+		-- OpenProSeries: header octet 15 (the user octet) of the last frame with a good FCS; 0x00 after reset.
+		-- Frames with a bad FCS, cut short or with a header that does not match never change it.
+		user_o			: out std_logic_vector(7 downto 0);
 		sync_o			: out std_logic
 	);
 end entity;
@@ -109,6 +112,7 @@ architecture rtl of aes50_rx_deframer is
 	signal frame_assm			: std_logic;				-- ASSM flag of the current frame
 	signal eth_ok				: std_logic;				-- EtherType and protocol id match
 	signal hdr_fmt				: std_logic_vector(7 downto 0);	-- octet 18
+	signal hdr_user				: std_logic_vector(7 downto 0);	-- octet 15, to user_o if the FCS is good
 	signal fcs_crc				: std_logic_vector(31 downto 0);
 	signal fcs_ok				: std_logic;
 	-- OpenProSeries: the CRC after row 10 block 30 and whether row 10 block 31 matched it as an FCS
@@ -258,6 +262,7 @@ begin
 							when 12 => if rxd_r & hdr_shift(7 downto 2) /= x"88" then header_ok <= '0'; eth_ok <= '0'; end if;
 							when 13 => if rxd_r & hdr_shift(7 downto 2) /= x"DD" then header_ok <= '0'; eth_ok <= '0'; end if;
 							when 14 => if rxd_r & hdr_shift(7 downto 2) /= x"01" then header_ok <= '0'; eth_ok <= '0'; end if;
+							when 15 => hdr_user <= rxd_r & hdr_shift(7 downto 2);
 							when 17 =>						-- frame type / flags
 								if (rxd_r & hdr_shift(7 downto 2)) = x"11" then
 									frame_assm <= '1';
@@ -483,6 +488,7 @@ begin
 							(short_ok = '1' and rx_dv_r = '0');
 						if frame_good then
 							frame_ok_o <= '1';
+							user_o <= hdr_user;
 							if not (rxd_r = not fcs_crc(1 downto 0) and fcs_ok = '1') then
 								frame_short_o <= '1';
 							end if;
@@ -555,6 +561,7 @@ begin
 				aux_page	<= '0';
 				wr_step		<= "00";
 				aux_wr_left	<= "000";
+				user_o		<= x"00";
 			end if;
 		end if;
 	end process;

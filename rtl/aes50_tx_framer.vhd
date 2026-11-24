@@ -69,6 +69,7 @@ entity aes50_tx_framer is
 		base_i			: in  unsigned(G_AW - 1 downto 0);
 		assm_i			: in  std_logic;		-- set ASSM flag in (first) frame header
 		aux_valid_i		: in  std_logic;
+		user_i			: in  std_logic_vector(7 downto 0) := x"00";	-- OpenProSeries: header octet 15 (user octet), taken at start_i
 		busy_o			: out std_logic;
 		frame_o			: out std_logic;		-- pulse at the start of each frame
 
@@ -94,6 +95,7 @@ architecture rtl of aes50_tx_framer is
 	signal block_base			: unsigned(G_AW - 1 downto 0);	-- RAM address of sample 0 / channel 0 of the block
 	signal assm_flag			: std_logic;
 	signal aux_valid			: std_logic;
+	signal user_octet			: std_logic_vector(7 downto 0);
 
 	-- payload position
 	signal dibit_idx			: unsigned(3 downto 0);		-- dibit within the block (0..15)
@@ -212,6 +214,7 @@ begin
 						block_base	<= base_i;
 						assm_flag	<= assm_i;
 						aux_valid	<= aux_valid_i;
+						user_octet	<= user_i;
 						second_half	<= '0';
 						state		<= S_PREAMBLE;
 						step_cnt	<= (others => '0');
@@ -235,6 +238,7 @@ begin
 				-- ------------------------------------------------------------
 				when S_HEADER =>							-- 22 octets = 88 dibits
 					hdr_octet := hdr_byte(to_integer(step_cnt(6 downto 2)), fs48_i, assm_flag and not second_half, fs96_i);
+					if step_cnt(6 downto 2) = 15 then hdr_octet := user_octet; end if;
 					hdr_dibit := hdr_octet(2 * to_integer(step_cnt(1 downto 0)) + 1 downto 2 * to_integer(step_cnt(1 downto 0)));
 					out_kind	<= OUT_DATA;
 					out_dibit	<= hdr_dibit;
@@ -537,6 +541,7 @@ begin
 				rmii_txd_o		<= "00";
 				fetch_step		<= (others => '0');
 				aux_load_step	<= (others => '0');
+				user_octet		<= x"00";
 			end if;
 		end if;
 	end process;
