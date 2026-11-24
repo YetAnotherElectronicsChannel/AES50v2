@@ -47,7 +47,10 @@ entity aes50_par_core is
 		G_WD_CLK			: natural := 25;		-- the v2 timers, in 50 MHz clocks (aes50_core defaults)
 		G_WD_RX_DV			: natural := 7500;
 		G_MDIX_1MS			: natural := 50000;
-		G_CLK_OK_REF		: natural := 500000
+		G_CLK_OK_REF		: natural := 500000;
+		-- aux RAM words per page (TX and RX, two pages each). A page holds one block's 44 aux words plus the RX
+		-- read-ahead word, so it must be > 44; 128 (256-word RAMs) is the original size, 48 is enough at 48k / 96k.
+		G_AUX_WORDS_PER_PAGE	: positive := 128
 	);
 	port (
 		clk50_i					: in  std_logic;
@@ -103,13 +106,37 @@ entity aes50_par_core is
 		rx_assm_o				: out std_logic;		-- a block with the ASSM flag was received
 		fmt_valid_o				: out std_logic;		-- aes50_rx_deframer's format report
 		fmt_bad_o				: out std_logic;
-		fmt_o					: out std_logic_vector(7 downto 0)
+		fmt_o					: out std_logic_vector(7 downto 0);
+
+		-- AES50 header octet 15 (the user octet), clk50_i. TX: sent in every frame, taken at the frame start;
+		-- 0x00 (the default) is today's behaviour. RX: the octet of the last frame with a good FCS, 0x00 after
+		-- reset or receive loss; bad or cut frames never change it. No protocol logic: the user drives both.
+		user_octet_tx_i			: in  std_logic_vector(7 downto 0) := x"00";
+		user_octet_rx_o			: out std_logic_vector(7 downto 0)
 	);
 end entity;
 
 architecture rtl of aes50_par_core is
 
 	constant AW				: natural := 9;			-- 48/96k only: 512-word sample rings
+
+	-- aux RAMs: page p, word i at p * G_AUX_WORDS_PER_PAGE + i (page & i for 128)
+	function clog2(n : positive) return natural is
+	begin
+		for r in 0 to 30 loop
+			if 2 ** r >= n then return r; end if;
+		end loop;
+		return 31;
+	end function;
+	constant AXW			: natural := clog2(2 * G_AUX_WORDS_PER_PAGE);
+	function aux_addr(page : std_logic; i : unsigned(6 downto 0)) return unsigned is
+	begin
+		if page = '1' then
+			return to_unsigned(G_AUX_WORDS_PER_PAGE, AXW) + resize(i, AXW);
+		else
+			return resize(i, AXW);
+		end if;
+	end function;
 
 	signal rst_sync			: std_logic_vector(1 downto 0);
 	signal phy_rst_cnt		: natural range 0 to 50000;
@@ -156,7 +183,7 @@ architecture rtl of aes50_par_core is
 	signal framer_assm		: std_logic;
 	signal framer_auxv		: std_logic;
 
-	-- TX aux: two pages of 128 words, one filled by the producer, one sent
+	-- TX aux: two pages of G_AUX_WORDS_PER_PAGE words, one filled by the producer, one sent
 	signal fill_page		: std_logic;
 	signal fill_cnt			: unsigned(6 downto 0);
 	signal fill_busy		: std_logic;
@@ -164,9 +191,9 @@ architecture rtl of aes50_par_core is
 	signal ready_page		: std_logic;
 	signal send_page		: std_logic;
 	signal txa_we			: std_logic;
-	signal txa_waddr		: unsigned(7 downto 0);
+	signal txa_waddr		: unsigned(AXW - 1 downto 0);
 	signal txa_wdata		: std_logic_vector(15 downto 0);
-	signal txa_raddr		: unsigned(7 downto 0);
+	signal txa_raddr		: unsigned(AXW - 1 downto 0);
 	signal framer_aux_addr	: unsigned(6 downto 0);
 	signal framer_aux_data	: std_logic_vector(15 downto 0);
 
@@ -177,9 +204,10 @@ architecture rtl of aes50_par_core is
 	signal rxr_raddr		: unsigned(AW - 1 downto 0) := (others => '0');
 	signal rxr_rdata		: std_logic_vector(23 downto 0);
 	signal rxa_we			: std_logic;
-	signal rxa_waddr		: unsigned(7 downto 0);
+	signal rxa_dfaddr		: unsigned(7 downto 0);		-- the deframer's page & word
+	signal rxa_waddr		: unsigned(AXW - 1 downto 0);
 	signal rxa_wdata		: std_logic_vector(15 downto 0);
-	signal rxa_raddr		: unsigned(7 downto 0);
+	signal rxa_raddr		: unsigned(AXW - 1 downto 0);
 	signal rxa_rdata		: std_logic_vector(15 downto 0);
 	signal blk_done			: std_logic;
 	signal blk_base			: unsigned(AW - 1 downto 0);
@@ -367,7 +395,7 @@ begin
 			txa_we <= '0';
 			if aux_tx_we_i = '1' and fill_busy = '1' then
 				txa_we		<= '1';
-				txa_waddr	<= fill_page & fill_cnt;
+				txa_waddr	<= aux_addr(fill_page, fill_cnt);
 				txa_wdata	<= aux_tx_data_i;
 				fill_cnt	<= fill_cnt + 1;
 				if fill_cnt = C_AUX_WORDS_PER_FRAME - 1 then
@@ -393,7 +421,7 @@ begin
 	end process;
 	tx_started_o <= tx_active;
 	aux_rx_count_o <= sa_left;
-	rxa_raddr      <= sa_page & sa_j;
+	rxa_raddr      <= aux_addr(sa_page, sa_j);
 	aux_rx_data_o  <= rxa_rdata;
 	aux_rx_first_o <= sa_f;
 
@@ -402,17 +430,18 @@ begin
 		port map (wclk_i => clk50_i, we_i => txr_we, waddr_i => txr_waddr, wdata_i => txr_wdata,
 				  rclk_i => clk50_i, raddr_i => txr_raddr, rdata_o => txr_rdata);
 	u_tx_aux_ram : entity work.aes50_dpram
-		generic map (G_AW => 8, G_DW => 16)
+		generic map (G_AW => AXW, G_DW => 16, G_RAM_STYLE => "distributed", G_DEPTH => 2 * G_AUX_WORDS_PER_PAGE)
 		port map (wclk_i => clk50_i, we_i => txa_we, waddr_i => txa_waddr, wdata_i => txa_wdata,
 				  rclk_i => clk50_i, raddr_i => txa_raddr, rdata_o => framer_aux_data);
 
-	txa_raddr <= send_page & framer_aux_addr;
+	txa_raddr <= aux_addr(send_page, framer_aux_addr);
 
 	u_framer : entity work.aes50_tx_framer
 		generic map (G_AW => AW)
 		port map (
 			clk_i => clk50_i, rst_i => core_rst, fs48_i => '1', fs96_i => fs96_i, i2s_i => '0',
 			start_i => framer_start, base_i => framer_base, assm_i => framer_assm, aux_valid_i => framer_auxv,
+			user_i => user_octet_tx_i,
 			busy_o => framer_busy, frame_o => tx_frame_o,
 			ram_addr_o => txr_raddr, ram_data_i => txr_rdata,
 			aux_addr_o => framer_aux_addr, aux_data_i => framer_aux_data,
@@ -425,18 +454,21 @@ begin
 			clk_i => clk50_i, rst_i => rx_rst, fs48_i => fs48, fs96_i => fs96_i,
 			rmii_crs_dv_i => rmii_crs_dv_i, rmii_rxd_i => rmii_rxd_i,
 			ram_we_o => rxr_we, ram_addr_o => rxr_waddr, ram_data_o => rxr_wdata,
-			aux_we_o => rxa_we, aux_addr_o => rxa_waddr, aux_data_o => rxa_wdata,
+			aux_we_o => rxa_we, aux_addr_o => rxa_dfaddr, aux_data_o => rxa_wdata,
 			blk_done_o => blk_done, blk_base_o => blk_base, blk_page_o => blk_page,
 			blk_ok_o => blk_ok, blk_assm_o => blk_assm,
 			frame_ok_o => rx_frame_ok_o, frame_err_o => rx_frame_err_o,
-			fmt_valid_o => fmt_valid_o, fmt_bad_o => fmt_bad_o, fmt_o => fmt_o, sync_o => open);
+			fmt_valid_o => fmt_valid_o, fmt_bad_o => fmt_bad_o, fmt_o => fmt_o,
+			user_o => user_octet_rx_o, sync_o => open);
+
+	rxa_waddr <= aux_addr(rxa_dfaddr(7), rxa_dfaddr(6 downto 0));
 
 	u_rx_ram : entity work.aes50_dpram
 		generic map (G_AW => AW, G_DW => 24)
 		port map (wclk_i => clk50_i, we_i => rxr_we, waddr_i => rxr_waddr, wdata_i => rxr_wdata,
 				  rclk_i => clk50_i, raddr_i => rxr_raddr, rdata_o => rxr_rdata);
 	u_rx_aux_ram : entity work.aes50_dpram
-		generic map (G_AW => 8, G_DW => 16)
+		generic map (G_AW => AXW, G_DW => 16, G_RAM_STYLE => "distributed", G_DEPTH => 2 * G_AUX_WORDS_PER_PAGE)
 		port map (wclk_i => clk50_i, we_i => rxa_we, waddr_i => rxa_waddr, wdata_i => rxa_wdata,
 				  rclk_i => clk50_i, raddr_i => rxa_raddr, rdata_o => rxa_rdata);
 
@@ -496,6 +528,21 @@ begin
 				st_on <= '0';
 				sa_left <= (others => '0');
 			end if;
+		end if;
+	end process;
+
+	-- aux page size: static check, and every aux RAM index inside its page (simulation)
+	assert G_AUX_WORDS_PER_PAGE > C_AUX_WORDS_PER_FRAME
+		report "aes50_par_core: aux page too small: G_AUX_WORDS_PER_PAGE must be > 44 (44 aux words per block at 48k / 96k, plus the RX read-ahead word)"
+		severity failure;
+	process (clk50_i)
+	begin
+		if rising_edge(clk50_i) then
+			assert aux_tx_we_i /= '1' or fill_busy /= '1' or fill_cnt < G_AUX_WORDS_PER_PAGE report "aes50_par_core: TX aux write index out of page" severity failure;
+			assert is_x(std_logic_vector(framer_aux_addr)) or framer_aux_addr < G_AUX_WORDS_PER_PAGE
+				report "aes50_par_core: TX aux read index out of page" severity failure;
+			assert rxa_we /= '1' or rxa_dfaddr(6 downto 0) < G_AUX_WORDS_PER_PAGE report "aes50_par_core: RX aux write index out of page" severity failure;
+			assert is_x(std_logic_vector(sa_j)) or sa_j < G_AUX_WORDS_PER_PAGE report "aes50_par_core: RX aux read index out of page" severity failure;
 		end if;
 	end process;
 

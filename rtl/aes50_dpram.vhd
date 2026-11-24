@@ -33,7 +33,9 @@ use ieee.numeric_std.all;
 entity aes50_dpram is
 	generic (
 		G_AW			: natural := 9;
-		G_DW			: natural := 24
+		G_DW			: natural := 24;
+		G_RAM_STYLE		: string := "auto";
+		G_DEPTH			: natural := 0			-- words; 0 = 2 ** G_AW (OpenProSeries: a smaller RAM, addresses < G_DEPTH)
 	);
 	port (
 		wclk_i			: in  std_logic;
@@ -49,8 +51,14 @@ end entity;
 
 architecture rtl of aes50_dpram is
 
-	type ram_t is array (0 to 2 ** G_AW - 1) of std_logic_vector(G_DW - 1 downto 0);
+	function depth(d, aw : natural) return natural is
+	begin
+		if d = 0 then return 2 ** aw; else return d; end if;
+	end function;
+	type ram_t is array (0 to depth(G_DEPTH, G_AW) - 1) of std_logic_vector(G_DW - 1 downto 0);
 	signal ram : ram_t := (others => (others => '0'));
+	attribute ram_style : string;
+	attribute ram_style of ram : signal is G_RAM_STYLE;
 
 begin
 
