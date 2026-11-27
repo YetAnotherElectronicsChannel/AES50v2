@@ -1,0 +1,1 @@
+aes50_pkg.vhd aes50_dpram.vhd aes50_link_ctrl.vhd aes50_clk_audio.vhd aes50_tx_framer.vhd aes50_rx_deframer.vhd aes50_par_core.vhd

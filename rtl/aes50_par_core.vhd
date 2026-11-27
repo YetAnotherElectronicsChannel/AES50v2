@@ -120,6 +120,8 @@ architecture rtl of aes50_par_core is
 
 	signal mdix				: std_logic;
 	signal audio_clock_ok	: std_logic;
+	signal clock_ok		: std_logic;			-- sync pairs active and PLL locked (no settle time)
+	signal grid_ok			: std_logic;			-- an ASSM was seen with clock_ok: the block grid is known
 	signal rx_ok			: std_logic;
 	signal clk625			: std_logic;
 	signal aes_clk_in		: std_logic;
@@ -136,10 +138,13 @@ architecture rtl of aes50_par_core is
 	signal assm_sync		: std_logic_vector(2 downto 0) := "000";
 
 	-- TX block forming (as aes50_tdm_serdes, one period = one 48k frame period)
+	-- grid anchor at an ASSM: the block with the ASSM flag ends with period E of the ASSM period (as before the fix)
+	constant GRID_E		: natural := G_ASSM_FRAMES - 1 - G_TX_LEAD_ADJ;
+	constant GRID_FIB0	: natural := block_frames('1') - 1 - GRID_E mod block_frames('1');
+	constant GRID_CNT0	: natural := (1024 - (GRID_E / block_frames('1')) mod 1024) mod 1024;
 	signal half				: std_logic;			-- 96k: the second period of the frame period
 	signal frames_since_assm: unsigned(10 downto 0);
 	signal assm_pending		: std_logic;
-	signal tx_aligned		: std_logic;
 	signal tx_active		: std_logic;
 	signal tx_frame_in_block: unsigned(2 downto 0);
 	signal tx_block_cnt		: unsigned(9 downto 0);
@@ -249,7 +254,7 @@ begin
 			pll_lock_n_i => pll_lock_n_i, rx_dv_i => rmii_crs_dv_i,
 			wd_aes_clk_timeout_i => G_WD_CLK, wd_aes_rx_dv_timeout_i => G_WD_RX_DV,
 			mdix_timer_1ms_i => G_MDIX_1MS, aes_clk_ok_ref_i => G_CLK_OK_REF,
-			mdix_o => mdix, aes_clock_ok_o => open, clock_health_good_o => audio_clock_ok,
+			mdix_o => mdix, aes_clock_ok_o => clock_ok, clock_health_good_o => audio_clock_ok,
 			rx_ok_o => rx_ok, clk625_o => clk625);
 
 	aes_ok_o	<= audio_clock_ok;
@@ -311,18 +316,12 @@ begin
 			if frame_start then
 				half <= '0';
 				frames_since_assm <= frames_since_assm + 1;
-				if assm_pending = '1' then
-					assm_pending		<= '0';
-					frames_since_assm	<= (others => '0');
-					if audio_clock_ok = '1' then
-						tx_aligned <= '1';
-					end if;
-				end if;
-				if tx_active = '1' then
-					if tx_frame_in_block = block_frames('1') - 1 then			-- the block ends with this period
-						tx_frame_in_block	<= (others => '0');
+				-- the block grid runs all the time; blocks are only formed and sent while tx_active
+				if tx_frame_in_block = block_frames('1') - 1 then			-- the block ends with this period
+					tx_frame_in_block	<= (others => '0');
+					tx_block_cnt		<= tx_block_cnt + 1;
+					if tx_active = '1' then
 						tx_block_addr		<= tx_frame_addr + C_AUDIO_CHANNELS;
-						tx_block_cnt		<= tx_block_cnt + 1;
 						if framer_busy = '0' then
 							framer_start	<= '1';
 							framer_base		<= tx_block_addr;
@@ -336,21 +335,34 @@ begin
 							fill_cnt		<= (others => '0');
 							fill_busy		<= '1';
 						end if;
-					else
-						tx_frame_in_block <= tx_frame_in_block + 1;
+					elsif audio_clock_ok = '1' and grid_ok = '1' and assm_pending = '0' then
+						-- first block: the next one of the grid, the ASSM flag still on the block that ends on an ASSM
+						tx_active		<= '1';
+						tx_block_addr	<= tx_frame_addr + C_AUDIO_CHANNELS;
 					end if;
+				else
+					tx_frame_in_block <= tx_frame_in_block + 1;
+				end if;
+				if tx_active = '1' then
 					tx_frame_addr <= tx_frame_addr + C_AUDIO_CHANNELS;
-				elsif tx_aligned = '1' and
-					  frames_since_assm = to_unsigned(G_ASSM_FRAMES - 2 - G_TX_LEAD_ADJ - (block_frames('1') - 1), 11) then
-					tx_active			<= '1';
-					tx_frame_in_block	<= (others => '0');
-					tx_block_cnt		<= (others => '0');
-					tx_frame_addr		<= tx_frame_addr + C_AUDIO_CHANNELS;
-					tx_block_addr		<= tx_frame_addr + C_AUDIO_CHANNELS;
+				elsif tx_frame_in_block = block_frames('1') - 1 and audio_clock_ok = '1' and grid_ok = '1' and assm_pending = '0' then
+					tx_frame_addr <= tx_frame_addr + C_AUDIO_CHANNELS;
+				end if;
+				if assm_pending = '1' then
+					assm_pending		<= '0';
+					frames_since_assm	<= (others => '0');
+					grid_ok				<= clock_ok;
+					if tx_active = '0' then
+						-- (re)anchor the grid: the block with the ASSM flag ends on the next ASSM (GRID_FIB0 / GRID_CNT0)
+						tx_frame_in_block	<= to_unsigned(GRID_FIB0, 3);
+						tx_block_cnt		<= to_unsigned(GRID_CNT0, 10);
+					end if;
 				end if;
 			end if;
+			if clock_ok = '0' then
+				grid_ok		<= '0';
+			end if;
 			if audio_clock_ok = '0' then
-				tx_aligned	<= '0';
 				tx_active	<= '0';
 			end if;
 
@@ -381,7 +393,7 @@ begin
 				half				<= '0';
 				frames_since_assm	<= (others => '0');
 				assm_pending		<= '0';
-				tx_aligned			<= '0';
+				grid_ok				<= '0';
 				tx_active			<= '0';
 				tx_frame_addr		<= (others => '0');
 				fill_busy			<= '0';
