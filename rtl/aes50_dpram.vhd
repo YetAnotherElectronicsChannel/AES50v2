@@ -33,7 +33,8 @@ use ieee.numeric_std.all;
 entity aes50_dpram is
 	generic (
 		G_AW			: natural := 9;
-		G_DW			: natural := 24
+		G_DW			: natural := 24;
+		G_RAM_STYLE		: string := "auto"
 	);
 	port (
 		wclk_i			: in  std_logic;
@@ -51,6 +52,8 @@ architecture rtl of aes50_dpram is
 
 	type ram_t is array (0 to 2 ** G_AW - 1) of std_logic_vector(G_DW - 1 downto 0);
 	signal ram : ram_t := (others => (others => '0'));
+	attribute ram_style : string;
+	attribute ram_style of ram : signal is G_RAM_STYLE;
 
 begin
 

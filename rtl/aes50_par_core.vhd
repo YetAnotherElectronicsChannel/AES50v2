@@ -414,7 +414,7 @@ begin
 		port map (wclk_i => clk50_i, we_i => txr_we, waddr_i => txr_waddr, wdata_i => txr_wdata,
 				  rclk_i => clk50_i, raddr_i => txr_raddr, rdata_o => txr_rdata);
 	u_tx_aux_ram : entity work.aes50_dpram
-		generic map (G_AW => 8, G_DW => 16)
+		generic map (G_AW => 8, G_DW => 16, G_RAM_STYLE => "distributed")
 		port map (wclk_i => clk50_i, we_i => txa_we, waddr_i => txa_waddr, wdata_i => txa_wdata,
 				  rclk_i => clk50_i, raddr_i => txa_raddr, rdata_o => framer_aux_data);
 
@@ -448,7 +448,7 @@ begin
 		port map (wclk_i => clk50_i, we_i => rxr_we, waddr_i => rxr_waddr, wdata_i => rxr_wdata,
 				  rclk_i => clk50_i, raddr_i => rxr_raddr, rdata_o => rxr_rdata);
 	u_rx_aux_ram : entity work.aes50_dpram
-		generic map (G_AW => 8, G_DW => 16)
+		generic map (G_AW => 8, G_DW => 16, G_RAM_STYLE => "distributed")
 		port map (wclk_i => clk50_i, we_i => rxa_we, waddr_i => rxa_waddr, wdata_i => rxa_wdata,
 				  rclk_i => clk50_i, raddr_i => rxa_raddr, rdata_o => rxa_rdata);
 
